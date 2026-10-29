@@ -16,6 +16,8 @@ import {
 } from "@opencode-ai/protocol/groups/pty"
 import { response } from "../location"
 import { PtyEnvironment } from "../pty-environment"
+import { FSUtil } from "@opencode-ai/util/fs-util"
+import { InvalidRequestError } from "@opencode-ai/protocol/errors"
 
 const ticketScope = Effect.gen(function* () {
   const location = yield* Location.Service
@@ -41,15 +43,25 @@ export const PtyHandler = HttpApiBuilder.group(Api, "server.pty", (handlers) =>
         Effect.fn(function* (ctx) {
           const pty = yield* Pty.Service
           const location = yield* Location.Service
-          const cwd = ctx.payload.cwd || location.directory
+          const fs = yield* FSUtil.Service
+          const requestedCwd = ctx.payload.cwd || location.directory
+          const resolvedCwd = yield* fs.realPath(requestedCwd).pipe(
+            Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(requestedCwd)),
+          )
+          if (!(yield* fs.contains(location.directory, resolvedCwd))) {
+            return yield* new InvalidRequestError({
+              message: "CWD must be within the project directory",
+              kind: "pty_cwd_outside_project",
+            })
+          }
           return yield* response(
             pty.create({
               ...ctx.payload,
               args: ctx.payload.args ? [...ctx.payload.args] : undefined,
-              cwd,
+              cwd: resolvedCwd,
               env: {
                 ...ctx.payload.env,
-                ...(yield* environment.get({ directory: location.directory, cwd })),
+                ...(yield* environment.get({ directory: location.directory, cwd: resolvedCwd })),
               },
             }),
           )

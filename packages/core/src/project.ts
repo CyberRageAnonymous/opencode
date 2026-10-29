@@ -221,7 +221,7 @@ const layer = Layer.effect(
 
       const hg = yield* hgDiscover(input)
       if (hg) return hg
-      return { id: ID.global, directory: AbsolutePath.make(path.parse(input).root), vcs: undefined }
+      return { id: ID.global, directory: input, vcs: undefined }
     })
 
     const commit = Effect.fn("Project.commit")(function* (input: { store: AbsolutePath; id: ID }) {
