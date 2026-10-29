@@ -11,7 +11,9 @@ import type {
   Result,
 } from "@opencode/schema/tool"
 import { Context, Effect, Ref, Schema, Semaphore } from "effect"
-import { definition, normalizedName } from "../tool/runtime.js"
+import type { Permission } from "../permission.js"
+import type { QuestionTool } from "../tool/plugin/question.js"
+import { definition, findDecline, normalizedName } from "../tool/runtime.js"
 import { CodeModeCatalog } from "./catalog.js"
 import { CodeModeWeb } from "./web.js"
 
@@ -91,12 +93,13 @@ export const create = (
         const callIndex = yield* Ref.make(0)
         const files = yield* Ref.make<Array<CollectedFiles>>([])
         const calls = yield* Ref.make<Array<ExecuteCall>>([])
+        const declined = yield* Ref.make<Permission.DeclinedError | QuestionTool.CancelledError | undefined>(undefined)
         const lock = Semaphore.makeUnsafe(1)
         const record = (update: (items: Array<ExecuteCall>) => Array<ExecuteCall>) =>
           lock.withPermit(
             Ref.updateAndGet(calls, update).pipe(Effect.tap((toolCalls) => context.progress({ toolCalls }))),
           )
-        const result = yield* runtime(inventory)
+        const exit = yield* runtime(inventory)
           .execute(code)
           .pipe(
             Effect.provideService(Run, {
@@ -114,10 +117,19 @@ export const create = (
                   if (executed.output !== undefined) return executed.output
                   const text = content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
                   return text === "" ? null : text
-                }),
+                }).pipe(
+                  // A program must not catch a decline: interrupting ends the execution, and it resurfaces below.
+                  Effect.catchCauseFilter(findDecline, (decline) =>
+                    Ref.set(declined, decline).pipe(Effect.andThen(Effect.interrupt)),
+                  ),
+                ),
               hooks: progressHooks(record),
             }),
+            Effect.exit,
           )
+        const decline = yield* Ref.get(declined)
+        if (decline) return yield* Effect.die(decline)
+        const result = yield* exit
         const toolCalls = yield* Ref.get(calls)
         const collected = (yield* Ref.get(files))
           .toSorted((left, right) => left.index - right.index)

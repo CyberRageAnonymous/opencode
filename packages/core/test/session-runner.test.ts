@@ -629,6 +629,45 @@ const subscribeRetries = (s: Scenario) =>
     return scheduled
   })
 
+const declineInCodeMode = (s: Scenario, code: string) =>
+  Effect.gen(function* () {
+    const later: string[] = []
+    yield* transformTools(yield* Tool.Service, {
+      declined: {
+        name: "declined",
+        description: "Fail because the user declined approval",
+        input: Schema.Struct({}),
+        output: Schema.Struct({}),
+        execute: () => Effect.die(new Permission.DeclinedError()),
+      },
+      later: {
+        name: "later",
+        description: "Run after the declined call",
+        input: Schema.Struct({}),
+        output: Schema.Struct({}),
+        execute: () => Effect.sync(() => later.push("later")).pipe(Effect.as({ output: {} })),
+      },
+    })
+    yield* s.admit("Run code")
+    yield* s.llm.push(TestLLM.tool("call-execute", "execute", { code }))
+
+    const exit = yield* s.resume.pipe(Effect.exit)
+
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Run code"),
+      Expected.assistant({}, [
+        Expected.failedTool(
+          { id: "call-execute" },
+          { error: { type: "aborted", message: "The user declined this tool call" } },
+        ),
+      ]),
+    ])
+    return later
+  })
+
 const providerUnavailable = () =>
   new AIError({
     reason: new TransportError({
@@ -5306,6 +5345,24 @@ describe("SessionRunnerLLM", () => {
         ),
       ]),
     ])
+  })
+
+  scenario("interrupts runner continuation on a decline a Code Mode program catches", function* (s) {
+    const later = yield* declineInCodeMode(
+      s,
+      "try { await tools.declined() } catch (e) {} await tools.later(); return 'done'",
+    )
+    expect(later).toEqual([])
+  })
+
+  scenario("interrupts runner continuation on a decline a Code Mode program does not catch", function* (s) {
+    const later = yield* declineInCodeMode(s, "await tools.declined(); await tools.later(); return 'done'")
+    expect(later).toEqual([])
+  })
+
+  scenario("interrupts runner continuation on a decline a Code Mode program never awaits", function* (s) {
+    const later = yield* declineInCodeMode(s, "tools.declined(); await tools.later(); return 'done'")
+    expect(later).toEqual(["later"])
   })
 
   scenario("returns permission corrections to the model and continues", function* (s) {
